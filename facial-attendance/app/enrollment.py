@@ -241,14 +241,17 @@ class EnrollmentManager:
         self,
         student_id: str,
         name: str,
-        image_input: Path | str | np.ndarray,
+        image_input: Path | str | np.ndarray | bytes,
         excel_service: ExcelService,
+        id_card_input: Optional[Path | str | np.ndarray | bytes] = None,
+        id_card_filename: Optional[str] = None,
     ) -> tuple[bool, str]:
         """Enroll a single student at runtime with transactional rollback.
 
-        Validates input fields and image, extracts normalized 512-d embedding,
-        saves photo to data/photos/, appends to students.xlsx, updates
-        data/embeddings.npz, and updates the live in-memory index immediately under lock.
+        Validates input fields, reference photo, and optional/required ID card image.
+        Extracts normalized 512-d embedding from reference photo only.
+        Saves photo to data/photos/, ID card to data/id_cards/, appends to students.xlsx,
+        updates data/embeddings.npz, and updates the live in-memory index immediately under lock.
 
         Returns:
             (success, message): True and confirmation message, or False and error explanation.
@@ -262,15 +265,21 @@ class EnrollmentManager:
         if not name_clean:
             return False, "Validation Error: Student Full Name cannot be empty."
 
+        # Path traversal guard
+        if ".." in sid_clean or "/" in sid_clean or "\\" in sid_clean:
+            return False, "Validation Error: Student ID contains invalid characters."
+
         with self._lock:
             # Check for duplicate in live index
             if sid_clean in self.student_ids:
                 return False, f"Validation Error: Student ID '{sid_clean}' is already enrolled."
 
-        # 2. Validate and load image
+        # 2. Validate and load reference photo
         img: Optional[np.ndarray] = None
         if isinstance(image_input, np.ndarray):
             img = image_input.copy()
+        elif isinstance(image_input, bytes):
+            img = cv2.imdecode(np.frombuffer(image_input, np.uint8), cv2.IMREAD_COLOR)
         elif isinstance(image_input, (str, Path)):
             img_path = Path(image_input)
             if not img_path.exists():
@@ -305,34 +314,104 @@ class EnrollmentManager:
             return False, "Biometric Error: Zero-norm embedding generated."
         normalized_emb = (raw_emb / norm).astype(np.float32)
 
+        # 3. Validate ID Card Image
+        id_card_img: Optional[np.ndarray] = None
+        card_ext = ".jpg"
+        if self.config.id_card_required and id_card_input is None:
+            return False, "Validation Error: ID card image is required."
+
+        if id_card_input is not None:
+            # Check extension
+            if id_card_filename:
+                card_ext = Path(id_card_filename).suffix.lower() or ".jpg"
+            elif isinstance(id_card_input, (str, Path)):
+                card_ext = Path(id_card_input).suffix.lower() or ".jpg"
+
+            if card_ext not in self.config.id_card_allowed_types:
+                return False, (
+                    f"Validation Error: Invalid ID card file type '{card_ext}'. "
+                    f"Allowed types: {', '.join(self.config.id_card_allowed_types)}."
+                )
+
+            # Check file size
+            size_bytes = 0
+            if isinstance(id_card_input, bytes):
+                size_bytes = len(id_card_input)
+            elif isinstance(id_card_input, (str, Path)):
+                p = Path(id_card_input)
+                if p.exists():
+                    size_bytes = p.stat().st_size
+            elif isinstance(id_card_input, np.ndarray):
+                size_bytes = id_card_input.nbytes
+
+            max_bytes = int(self.config.id_card_max_mb * 1024 * 1024)
+            if size_bytes > max_bytes:
+                return False, (
+                    f"Validation Error: ID card file size exceeds maximum limit of "
+                    f"{self.config.id_card_max_mb}MB."
+                )
+
+            # Decode image
+            if isinstance(id_card_input, np.ndarray):
+                id_card_img = id_card_input.copy()
+            elif isinstance(id_card_input, bytes):
+                id_card_img = cv2.imdecode(np.frombuffer(id_card_input, np.uint8), cv2.IMREAD_COLOR)
+            elif isinstance(id_card_input, (str, Path)):
+                id_card_img = cv2.imread(str(id_card_input))
+
+            if id_card_img is None or id_card_img.size == 0:
+                return False, "Validation Error: ID card image could not be decoded or is corrupted."
+
         # Tracking variables for transactional rollback
         saved_photo_path: Optional[Path] = None
+        saved_id_card_path: Optional[Path] = None
         excel_row_added = False
         temp_npz_path: Optional[Path] = None
 
         self.config.ensure_directories()
         dest_filename = f"{sid_clean}.jpg"
-        dest_photo_path = self.config.photos_dir / dest_filename
+        dest_photo_path = (self.config.photos_dir / dest_filename).resolve()
         rel_photo_path = f"photos/{dest_filename}"
 
+        # Path traversal security check
+        if not dest_photo_path.is_relative_to(self.config.photos_dir.resolve()):
+            return False, "Security Error: Path traversal attempt detected in photo path."
+
+        rel_card_path: Optional[str] = None
+        dest_card_path: Optional[Path] = None
+        if id_card_img is not None:
+            dest_card_filename = f"{sid_clean}{card_ext}"
+            dest_card_path = (self.config.id_card_dir / dest_card_filename).resolve()
+            if not dest_card_path.is_relative_to(self.config.id_card_dir.resolve()):
+                return False, "Security Error: Path traversal attempt detected in ID card path."
+            rel_card_path = f"id_cards/{dest_card_filename}"
+
         try:
-            # 3. Save photo to data/photos/
+            # 4. Save photo to data/photos/
             write_ok = cv2.imwrite(str(dest_photo_path), img)
             if not write_ok:
                 raise IOError(f"Could not write reference photo to '{dest_photo_path}'.")
             saved_photo_path = dest_photo_path
 
-            # 4. Append row to data/students.xlsx
+            # 5. Save ID card to data/id_cards/ if provided
+            if id_card_img is not None and dest_card_path is not None:
+                write_card_ok = cv2.imwrite(str(dest_card_path), id_card_img)
+                if not write_card_ok:
+                    raise IOError(f"Could not write ID card to '{dest_card_path}'.")
+                saved_id_card_path = dest_card_path
+
+            # 6. Append row to data/students.xlsx
             excel_ok, excel_err = excel_service.append_student_record(
                 student_id=sid_clean,
                 name=name_clean,
                 photo_path_str=rel_photo_path,
+                id_card_path_str=rel_card_path,
             )
             if not excel_ok:
                 raise RuntimeError(f"Excel registry update failed: {excel_err}")
             excel_row_added = True
 
-            # 5. Add embedding + ID to data/embeddings.npz without overwriting existing
+            # 7. Add embedding + ID to data/embeddings.npz without overwriting existing
             with self._lock:
                 current_ids = list(self.student_ids)
                 current_embs = self.embeddings
@@ -351,6 +430,8 @@ class EnrollmentManager:
                     name=name_clean,
                     photo_path=dest_photo_path,
                     raw_photo_path=rel_photo_path,
+                    id_card_path=saved_id_card_path,
+                    raw_id_card_path=rel_card_path,
                 )
                 records_list.append(new_record)
                 fingerprint = self.calculate_registry_fingerprint(records_list)
@@ -375,7 +456,7 @@ class EnrollmentManager:
                     temp_npz_path.replace(self.config.embeddings_file)
                 temp_npz_path = None
 
-                # 6. Update in-memory index immediately under lock (no restart)
+                # 8. Update in-memory index immediately under lock (no restart)
                 self.student_ids = new_ids
                 self.embeddings = new_embs
                 self.id_to_record[sid_clean] = new_record
@@ -401,4 +482,48 @@ class EnrollmentManager:
                 except Exception:
                     pass
 
+            if saved_id_card_path is not None and saved_id_card_path.exists():
+                try:
+                    saved_id_card_path.unlink()
+                except Exception:
+                    pass
+
             return False, f"Enrollment Failed: {exc}"
+
+    def clear_all_enrollments(self) -> None:
+        """Clear all enrolled students from memory, empty embeddings.npz, and remove photo/ID card files."""
+        with self._lock:
+            self.student_ids = []
+            self.embeddings = np.zeros((0, 512), dtype=np.float32)
+            self.id_to_record.clear()
+
+            # Save empty embeddings.npz
+            try:
+                np.savez_compressed(
+                    self.config.embeddings_file,
+                    embeddings=np.zeros((0, 512), dtype=np.float32),
+                    student_ids=np.array([], dtype=str),
+                    metadata=json.dumps({"fingerprint": {}, "timestamp": time.time()}),
+                )
+            except Exception as exc:
+                logger.error("Failed to write empty embeddings.npz: %s", exc)
+
+            # Remove stored photos
+            if self.config.photos_dir.exists():
+                for p in self.config.photos_dir.iterdir():
+                    if p.is_file():
+                        try:
+                            p.unlink()
+                        except Exception:
+                            pass
+
+            # Remove stored ID cards
+            if self.config.id_card_dir.exists():
+                for p in self.config.id_card_dir.iterdir():
+                    if p.is_file():
+                        try:
+                            p.unlink()
+                        except Exception:
+                            pass
+            logger.info("Cleared all student enrollments, photos, and embeddings.")
+

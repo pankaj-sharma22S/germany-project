@@ -23,6 +23,8 @@ yarn-error.log*
 # Output and sensitive biometric files
 data/embeddings.npz
 data/attendance.xlsx
+data/photos/
+data/id_cards/
 *.log
 
 # IDE and OS files

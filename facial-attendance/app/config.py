@@ -92,6 +92,32 @@ class Config:
     def REQUIRED_STABLE_FRAMES(self) -> int:
         return self.required_stable_frames
 
+    # Attendance Recording Mode
+    attendance_mode: str = "session"  # "daily" (1 row per student per date, updated in-place) or "session"
+
+    # ID Card Settings
+    id_cards_dir_name: str = "id_cards"
+    id_card_allowed_types: tuple[str, ...] = (".jpg", ".jpeg", ".png", ".webp")
+    id_card_max_mb: float = 5.0
+    id_card_required: bool = False  # Configurable (set True to enforce ID card on every new enrollment)
+
+    # Uppercase aliases for prompt compatibility
+    @property
+    def ID_CARD_DIR(self) -> Path:
+        return self.id_card_dir
+
+    @property
+    def ID_CARD_ALLOWED_TYPES(self) -> tuple[str, ...]:
+        return self.id_card_allowed_types
+
+    @property
+    def ID_CARD_MAX_MB(self) -> float:
+        return self.id_card_max_mb
+
+    @property
+    def ID_CARD_REQUIRED(self) -> bool:
+        return self.id_card_required
+
     # Logging and Threading
     log_level: str = "INFO"
     queue_timeout_sec: float = 0.5
@@ -109,6 +135,10 @@ class Config:
         return self.data_dir / self.photos_dir_name
 
     @property
+    def id_card_dir(self) -> Path:
+        return self.data_dir / self.id_cards_dir_name
+
+    @property
     def embeddings_file(self) -> Path:
         return self.data_dir / self.embeddings_file_name
 
@@ -120,6 +150,7 @@ class Config:
         """Create necessary project directories if they do not exist."""
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.photos_dir.mkdir(parents=True, exist_ok=True)
+        self.id_card_dir.mkdir(parents=True, exist_ok=True)
 
 
 # Default global instance

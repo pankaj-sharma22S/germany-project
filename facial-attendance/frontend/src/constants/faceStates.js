@@ -80,8 +80,8 @@ export const FACE_STATE_CONFIG = {
     color: '#27ae60', // Emerald Green
     badgeBg: '#27ae60',
     badgeText: '#ffffff',
-    label: 'Already Marked',
-    description: 'Already marked',
+    label: 'Already Marked Present',
+    description: 'Already marked present',
   },
   [FACE_STATES.UNKNOWN]: {
     color: '#e74c3c', // Crimson Red

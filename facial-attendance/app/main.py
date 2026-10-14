@@ -261,8 +261,26 @@ class AttendanceApp:
                         decision = self.stability_mgr.update_face(track)
                         match_res = bbox_to_match.get(track.bbox)
 
+                        # If face is already marked present in this session, show immediately without duplicate write
+                        if (
+                            match_res
+                            and match_res.is_known
+                            and match_res.student_id
+                            and match_res.student_id in self.attendance_mgr.present_student_ids
+                        ):
+                            self.stability_mgr.mark_recognition_result(
+                                track_id=track.track_id,
+                                is_known=True,
+                                student_id=match_res.student_id,
+                                name=match_res.name,
+                                score=match_res.similarity,
+                                attendance_status="Already marked",
+                            )
+                            decision = self.stability_mgr.update_face(track)
+                            status_msg = f"Already marked present - {match_res.name} ({match_res.student_id})"
+                            status_msg_time = time.time()
                         # 3. Recognition & Confirmed Persistence trigger
-                        if decision.ready_for_recognition:
+                        elif decision.ready_for_recognition:
                             if match_res and match_res.is_known and match_res.student_id:
                                 # Submit event and WAIT for confirmed Excel write
                                 att_msg, is_marked, err = self.attendance_mgr.confirm_and_write_attendance(
@@ -280,7 +298,10 @@ class AttendanceApp:
                                     error_msg=err,
                                 )
                                 if is_marked:
-                                    status_msg = att_msg
+                                    if "already marked" in att_msg.lower():
+                                        status_msg = f"Already marked present - {match_res.name} ({match_res.student_id})"
+                                    else:
+                                        status_msg = att_msg
                                     status_msg_time = time.time()
                             else:
                                 # Unknown face

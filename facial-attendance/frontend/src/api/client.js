@@ -3,7 +3,10 @@
  * Localhost 127.0.0.1 binding only.
  */
 
-const API_BASE_URL = 'http://127.0.0.1:8000';
+const API_BASE_URL =
+  typeof window !== 'undefined' && window.location.port !== '5173' && window.location.origin.startsWith('http')
+    ? window.location.origin
+    : 'http://127.0.0.1:8000';
 
 async function handleResponse(response) {
   if (!response.ok) {
@@ -54,11 +57,15 @@ export const apiClient = {
     return handleResponse(res);
   },
 
-  async enrollStudent(studentId, name, imageFile) {
+  async enrollStudent(studentId, name, photoFile, idCardFile = null) {
     const formData = new FormData();
     formData.append('student_id', studentId);
     formData.append('name', name);
-    formData.append('image', imageFile);
+    formData.append('photo', photoFile);
+    formData.append('image', photoFile); // backward compatibility
+    if (idCardFile) {
+      formData.append('id_card', idCardFile);
+    }
 
     const res = await fetch(`${API_BASE_URL}/api/students`, {
       method: 'POST',
@@ -67,8 +74,45 @@ export const apiClient = {
     return handleResponse(res);
   },
 
+  async getStudentDetails(studentId, sessionId = null) {
+    const url = new URL(`${API_BASE_URL}/api/students/${encodeURIComponent(studentId)}`);
+    if (sessionId) {
+      url.searchParams.set('session_id', sessionId);
+    }
+    const res = await fetch(url.toString());
+    return handleResponse(res);
+  },
+
+  getStudentPhotoUrl(studentId) {
+    return `${API_BASE_URL}/api/students/${encodeURIComponent(studentId)}/photo`;
+  },
+
+  getStudentIdCardUrl(studentId) {
+    return `${API_BASE_URL}/api/students/${encodeURIComponent(studentId)}/id-card`;
+  },
+
   async getRecentAttendance() {
     const res = await fetch(`${API_BASE_URL}/api/attendance/recent`);
     return handleResponse(res);
   },
+
+  async getExcelSheetData(sheet = 'attendance') {
+    const res = await fetch(`${API_BASE_URL}/api/excel/data?sheet=${encodeURIComponent(sheet)}`);
+    return handleResponse(res);
+  },
+
+  getExcelDownloadUrl(fileName) {
+    return `${API_BASE_URL}/api/excel/download/${encodeURIComponent(fileName)}`;
+  },
+
+  async deduplicateAttendance() {
+    const res = await fetch(`${API_BASE_URL}/api/excel/deduplicate`, { method: 'POST' });
+    return handleResponse(res);
+  },
+
+  async clearAllData() {
+    const res = await fetch(`${API_BASE_URL}/api/admin/clear-data`, { method: 'POST' });
+    return handleResponse(res);
+  },
 };
+

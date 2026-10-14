@@ -23,6 +23,8 @@ from typing import Optional
 import cv2
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 import numpy as np
 from pydantic import BaseModel
 
@@ -53,6 +55,7 @@ class SystemServices:
             project_root=config.project_root,
             registry_file=config.students_file,
             attendance_file=config.attendance_file,
+            attendance_mode=getattr(config, "attendance_mode", "daily"),
         )
         self.enrollment_mgr = EnrollmentManager(config=config)
         self.face_recognizer = FaceRecognizer(
@@ -166,7 +169,24 @@ class SystemServices:
                 decision = self.stability_mgr.update_face(track)
                 match_res = bbox_to_match.get(track.bbox)
 
-                if decision.ready_for_recognition:
+                # If face is already marked present in this session, show immediately without duplicate write
+                if (
+                    match_res
+                    and match_res.is_known
+                    and match_res.student_id
+                    and match_res.student_id in self.attendance_mgr.present_student_ids
+                ):
+                    self.stability_mgr.mark_recognition_result(
+                        track_id=track.track_id,
+                        is_known=True,
+                        student_id=match_res.student_id,
+                        name=match_res.name,
+                        score=match_res.similarity,
+                        attendance_status="Already marked",
+                    )
+                    decision = self.stability_mgr.update_face(track)
+                    frame_message = f"Already marked present - {match_res.name} ({match_res.student_id})"
+                elif decision.ready_for_recognition:
                     if match_res and match_res.is_known and match_res.student_id:
                         # Submit event and WAIT for confirmed Excel write
                         att_msg, is_marked, err = self.attendance_mgr.confirm_and_write_attendance(
@@ -183,7 +203,10 @@ class SystemServices:
                             attendance_status=att_msg,
                             error_msg=err,
                         )
-                        frame_message = att_msg
+                        if "already marked" in att_msg.lower():
+                            frame_message = f"Already marked present - {match_res.name} ({match_res.student_id})"
+                        else:
+                            frame_message = att_msg
                     else:
                         unknown_score = match_res.similarity if match_res else 0.0
                         self.stability_mgr.mark_recognition_result(
@@ -410,27 +433,42 @@ async def get_students():
 async def enroll_student(
     student_id: str = Form(...),
     name: str = Form(...),
-    image: UploadFile = File(...),
+    photo: Optional[UploadFile] = File(None),
+    image: Optional[UploadFile] = File(None),
+    id_card: Optional[UploadFile] = File(None),
 ):
     """Runtime enrollment of a single student with image validation and transactional rollback."""
-    # Read image bytes
-    contents = await image.read()
+    ref_file = photo or image
+    if ref_file is None:
+        raise HTTPException(status_code=400, detail="Reference photo is required.")
+
+    # Read reference photo bytes
+    contents = await ref_file.read()
     if not contents:
-        raise HTTPException(status_code=400, detail="Uploaded image file is empty.")
+        raise HTTPException(status_code=400, detail="Uploaded reference photo file is empty.")
 
     nparr = np.frombuffer(contents, np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
     if img is None or img.size == 0:
         raise HTTPException(
             status_code=400,
-            detail="Uploaded file is not a valid or readable image.",
+            detail="Uploaded reference photo is not a valid or readable image.",
         )
+
+    # Read ID card bytes if provided
+    id_card_bytes: Optional[bytes] = None
+    id_card_fname: Optional[str] = None
+    if id_card is not None:
+        id_card_bytes = await id_card.read()
+        id_card_fname = id_card.filename
 
     success, message = services.enrollment_mgr.enroll_single_student(
         student_id=student_id,
         name=name,
         image_input=img,
         excel_service=services.excel_service,
+        id_card_input=id_card_bytes,
+        id_card_filename=id_card_fname,
     )
 
     if not success:
@@ -444,6 +482,108 @@ async def enroll_student(
         services.attendance_mgr.eligible_students = {r.student_id: r for r in records}
 
     return {"success": True, "message": message, "student_id": student_id, "name": name}
+
+
+@app.get("/api/students/{student_id}")
+async def get_student_details(student_id: str, session_id: Optional[str] = None):
+    """Retrieve details for a single student including optional session attendance."""
+    # Path traversal guard
+    if ".." in student_id or "/" in student_id or "\\" in student_id:
+        raise HTTPException(status_code=400, detail="Invalid student ID: path traversal detected.")
+
+    student = services.excel_service.get_student_by_id(student_id)
+    if not student:
+        raise HTTPException(status_code=404, detail=f"Student '{student_id}' not found.")
+
+    has_photo = bool(student.photo_path and student.photo_path.exists())
+    has_id_card = bool(student.id_card_path and student.id_card_path.exists())
+
+    attendance_data = None
+    if session_id:
+        rec = services.excel_service.get_attendance_record(session_id, student.student_id)
+        if rec:
+            attendance_data = {
+                "session_id": rec["session_id"],
+                "date": rec["date"],
+                "time": rec["time"],
+                "status": rec["status"],
+                "similarity": round(float(rec.get("match_score", 0.0)), 4),
+            }
+        else:
+            attendance_data = {
+                "session_id": session_id,
+                "status": "Not marked in this session",
+                "date": None,
+                "time": None,
+                "similarity": None,
+            }
+
+    # Security: never expose embeddings
+    return {
+        "student_id": student.student_id,
+        "name": student.name,
+        "has_photo": has_photo,
+        "photo_url": f"/api/students/{student.student_id}/photo" if has_photo else None,
+        "has_id_card": has_id_card,
+        "id_card_url": f"/api/students/{student.student_id}/id-card" if has_id_card else None,
+        "attendance": attendance_data,
+    }
+
+
+@app.get("/api/students/{student_id}/photo")
+async def get_student_photo(student_id: str):
+    """Serve protected reference photo for a student."""
+    if ".." in student_id or "/" in student_id or "\\" in student_id:
+        raise HTTPException(status_code=400, detail="Invalid student ID: path traversal detected.")
+
+    student = services.excel_service.get_student_by_id(student_id)
+    if not student:
+        raise HTTPException(status_code=404, detail=f"Student '{student_id}' not found.")
+
+    if not student.photo_path or not student.photo_path.exists():
+        raise HTTPException(status_code=404, detail=f"Reference photo for student '{student_id}' not found.")
+
+    resolved = student.photo_path.resolve()
+    photos_dir = services.config.photos_dir.resolve()
+    if not resolved.is_relative_to(photos_dir):
+        raise HTTPException(status_code=403, detail="Access denied: path traversal attempt.")
+
+    ext = resolved.suffix.lower()
+    media_type = "image/jpeg"
+    if ext == ".png":
+        media_type = "image/png"
+    elif ext == ".webp":
+        media_type = "image/webp"
+
+    return FileResponse(str(resolved), media_type=media_type)
+
+
+@app.get("/api/students/{student_id}/id-card")
+async def get_student_id_card(student_id: str):
+    """Serve protected ID card image for a student."""
+    if ".." in student_id or "/" in student_id or "\\" in student_id:
+        raise HTTPException(status_code=400, detail="Invalid student ID: path traversal detected.")
+
+    student = services.excel_service.get_student_by_id(student_id)
+    if not student:
+        raise HTTPException(status_code=404, detail=f"Student '{student_id}' not found.")
+
+    if not student.id_card_path or not student.id_card_path.exists():
+        raise HTTPException(status_code=404, detail=f"ID card image for student '{student_id}' not found.")
+
+    resolved = student.id_card_path.resolve()
+    id_card_dir = services.config.id_card_dir.resolve()
+    if not resolved.is_relative_to(id_card_dir):
+        raise HTTPException(status_code=403, detail="Access denied: path traversal attempt.")
+
+    ext = resolved.suffix.lower()
+    media_type = "image/jpeg"
+    if ext == ".png":
+        media_type = "image/png"
+    elif ext == ".webp":
+        media_type = "image/webp"
+
+    return FileResponse(str(resolved), media_type=media_type)
 
 
 @app.get("/api/attendance/recent")
@@ -464,6 +604,81 @@ async def get_recent_attendance():
         for ev in events
     ]
     return {"recent": result}
+
+
+@app.get("/api/excel/data")
+async def get_excel_sheet_data(sheet: str = "attendance"):
+    """Get live spreadsheet data and summary directly from Excel workbooks on disk."""
+    sheet_clean = sheet.lower().strip()
+    if sheet_clean not in ("attendance", "students"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid sheet parameter '{sheet}'. Must be 'attendance' or 'students'.",
+        )
+    data = services.excel_service.get_sheet_data(sheet_clean)
+    return data
+
+
+@app.get("/api/excel/download/{file_name}")
+async def download_excel_file(file_name: str):
+    """Download the actual Excel workbook file directly."""
+    clean_name = file_name.strip().lower()
+    if clean_name == "attendance.xlsx":
+        target = services.excel_service.attendance_file
+    elif clean_name == "students.xlsx":
+        target = services.excel_service.registry_file
+    else:
+        raise HTTPException(status_code=404, detail="File not found or access denied.")
+
+    if not target.exists():
+        services.excel_service.clear_all_data()
+
+    if not target.exists():
+        raise HTTPException(status_code=404, detail=f"File {file_name} does not exist yet.")
+
+    return FileResponse(
+        str(target),
+        filename=target.name,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+
+@app.post("/api/excel/deduplicate")
+async def deduplicate_attendance_records():
+    """Remove redundant rows in attendance.xlsx, keeping 1 row per student per date."""
+    removed = services.excel_service.deduplicate_attendance()
+    return {"success": True, "removed_rows": removed, "message": f"Deduplicated {removed} rows."}
+
+
+@app.post("/api/admin/clear-data")
+async def clear_all_data():
+    """Clear all student information, reference photos, embeddings, and attendance data.
+
+    Starts the entire system completely fresh.
+    """
+    # 1. Clear Excel workbooks
+    success, msg = services.excel_service.clear_all_data()
+    if not success:
+        raise HTTPException(status_code=500, detail=msg)
+
+    # 2. Clear enrollment manager and embeddings
+    services.enrollment_mgr.clear_all_enrollments()
+    services.records = []
+
+    # 3. Reset attendance manager state
+    with services.attendance_mgr._lock:
+        services.attendance_mgr.present_student_ids.clear()
+        services.attendance_mgr.eligible_students.clear()
+        services.attendance_mgr._observations.clear()
+        services.attendance_mgr.recent_events.clear()
+
+    logger.info("Admin cleared all student data, embeddings, photos, and attendance.")
+    return {
+        "success": True,
+        "message": "All student information, photos, embeddings, and attendance records have been cleared. System is fresh and ready.",
+    }
+
+
 
 
 @app.websocket("/ws/stream")
@@ -493,3 +708,24 @@ async def websocket_stream(websocket: WebSocket):
         with services._lock:
             services.connected_websockets.discard(websocket)
             services.client_queues.pop(websocket, None)
+
+
+# Serve compiled React frontend if frontend/dist exists
+FRONTEND_DIST = Path(__file__).resolve().parent.parent / "frontend" / "dist"
+if FRONTEND_DIST.exists():
+    app.mount("/assets", StaticFiles(directory=str(FRONTEND_DIST / "assets")), name="assets")
+
+    @app.get("/{full_path:path}")
+    async def serve_frontend(full_path: str):
+        if full_path.startswith("api/") or full_path.startswith("ws/"):
+            raise HTTPException(status_code=404, detail="Not Found")
+        target_file = FRONTEND_DIST / full_path
+        if target_file.exists() and target_file.is_file():
+            return FileResponse(str(target_file))
+        return FileResponse(str(FRONTEND_DIST / "index.html"))
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("app.api:app", host="127.0.0.1", port=8000, reload=False)
+

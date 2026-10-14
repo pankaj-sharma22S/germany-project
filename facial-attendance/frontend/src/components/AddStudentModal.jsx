@@ -1,23 +1,41 @@
 import React, { useState } from 'react';
 
 /**
- * AddStudentModal: Runtime enrollment form with client-side image preview and backend validation.
+ * AddStudentModal: Runtime enrollment form with reference photo and ID card upload.
  */
-export function AddStudentModal({ isOpen, onClose, onEnrollSuccess, enrollApi }) {
+export function AddStudentModal({ isOpen, onClose, onEnrollSuccess, enrollApi, idCardRequired = true }) {
   const [studentId, setStudentId] = useState('');
   const [name, setName] = useState('');
   const [imageFile, setImageFile] = useState(null);
   const [previewUrl, setPreviewUrl] = useState(null);
+  const [idCardFile, setIdCardFile] = useState(null);
+  const [idCardPreviewUrl, setIdCardPreviewUrl] = useState(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [feedback, setFeedback] = useState({ text: '', type: null }); // type: 'success' | 'error' | 'info'
+  const [feedback, setFeedback] = useState({ text: '', type: null });
 
   if (!isOpen) return null;
 
-  function handleFileChange(e) {
+  function handlePhotoChange(e) {
     const file = e.target.files?.[0];
     if (file) {
       setImageFile(file);
       setPreviewUrl(URL.createObjectURL(file));
+      setFeedback({ text: '', type: null });
+    }
+  }
+
+  function handleIdCardChange(e) {
+    const file = e.target.files?.[0];
+    if (file) {
+      if (file.size > 5 * 1024 * 1024) {
+        setFeedback({
+          text: 'Validation Error: ID card file size exceeds 5MB limit.',
+          type: 'error',
+        });
+        return;
+      }
+      setIdCardFile(file);
+      setIdCardPreviewUrl(URL.createObjectURL(file));
       setFeedback({ text: '', type: null });
     }
   }
@@ -40,12 +58,16 @@ export function AddStudentModal({ isOpen, onClose, onEnrollSuccess, enrollApi })
       setFeedback({ text: 'Validation Error: Reference photo is required.', type: 'error' });
       return;
     }
+    if (idCardRequired && !idCardFile) {
+      setFeedback({ text: 'Validation Error: ID card image is required.', type: 'error' });
+      return;
+    }
 
     setIsSubmitting(true);
-    setFeedback({ text: 'Processing photo & extracting biometric embedding...', type: 'info' });
+    setFeedback({ text: 'Processing photo & ID card biometric enrollment...', type: 'info' });
 
     try {
-      const res = await enrollApi(cleanId, cleanName, imageFile);
+      const res = await enrollApi(cleanId, cleanName, imageFile, idCardFile);
       setFeedback({
         text: res.message || `Student ${cleanName} (${cleanId}) enrolled successfully!`,
         type: 'success',
@@ -55,7 +77,6 @@ export function AddStudentModal({ isOpen, onClose, onEnrollSuccess, enrollApi })
         onEnrollSuccess(cleanId, cleanName);
       }
 
-      // Auto-close modal after successful enrollment
       setTimeout(() => {
         handleClose();
       }, 1500);
@@ -73,9 +94,14 @@ export function AddStudentModal({ isOpen, onClose, onEnrollSuccess, enrollApi })
     setStudentId('');
     setName('');
     setImageFile(null);
+    setIdCardFile(null);
     if (previewUrl) {
       URL.revokeObjectURL(previewUrl);
       setPreviewUrl(null);
+    }
+    if (idCardPreviewUrl) {
+      URL.revokeObjectURL(idCardPreviewUrl);
+      setIdCardPreviewUrl(null);
     }
     setFeedback({ text: '', type: null });
     setIsSubmitting(false);
@@ -123,24 +149,47 @@ export function AddStudentModal({ isOpen, onClose, onEnrollSuccess, enrollApi })
           </div>
 
           <div className="form-group">
-            <label htmlFor="student-photo-input">Reference Photo</label>
+            <label htmlFor="student-photo-input">Reference Face Photo</label>
             <div className="photo-upload-area">
               <input
                 id="student-photo-input"
                 type="file"
                 accept="image/jpeg,image/png,image/webp,image/bmp"
-                onChange={handleFileChange}
+                onChange={handlePhotoChange}
                 disabled={isSubmitting}
                 className="file-input"
                 data-testid="input-student-photo"
               />
-              <span className="upload-hint">Must contain exactly 1 clear frontal face.</span>
+              <span className="upload-hint">Must contain exactly 1 clear frontal face for recognition.</span>
             </div>
 
             {previewUrl && (
               <div className="photo-preview-box" data-testid="photo-preview">
                 <img src={previewUrl} alt="Reference Preview" className="preview-thumbnail" />
                 <span className="preview-filename">{imageFile?.name}</span>
+              </div>
+            )}
+          </div>
+
+          <div className="form-group">
+            <label htmlFor="student-id-card-input">ID Card Image {idCardRequired ? '(Required)' : '(Optional)'}</label>
+            <div className="photo-upload-area">
+              <input
+                id="student-id-card-input"
+                type="file"
+                accept="image/jpeg,image/png,image/webp"
+                onChange={handleIdCardChange}
+                disabled={isSubmitting}
+                className="file-input"
+                data-testid="input-student-id-card"
+              />
+              <span className="upload-hint">Upload student ID card photo or scan (max 5MB).</span>
+            </div>
+
+            {idCardPreviewUrl && (
+              <div className="photo-preview-box" data-testid="id-card-preview">
+                <img src={idCardPreviewUrl} alt="ID Card Preview" className="preview-thumbnail" />
+                <span className="preview-filename">{idCardFile?.name}</span>
               </div>
             )}
           </div>

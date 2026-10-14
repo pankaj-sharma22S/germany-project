@@ -1,6 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
 
-const WS_URL = 'ws://127.0.0.1:8000/ws/stream';
+const WS_URL =
+  typeof window !== 'undefined' && window.location.port !== '5173' && window.location.origin.startsWith('http')
+    ? `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}/ws/stream`
+    : 'ws://127.0.0.1:8000/ws/stream';
 
 export function useStream() {
   const [streamData, setStreamData] = useState({

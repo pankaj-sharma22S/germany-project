@@ -1,9 +1,28 @@
 import React from 'react';
+import { useNavigate } from 'react-router-dom';
 
 /**
  * RecentAttendance: Lists recent confirmed marks persisted to Excel for active session.
+ * Each row includes a "View details" button to navigate to the student's detail page.
  */
-export function RecentAttendance({ items = [] }) {
+export function RecentAttendance({ items = [], currentSessionId = '', onViewDetails = null }) {
+  let navigate = null;
+  try {
+    navigate = useNavigate();
+  } catch {
+    // Fallback if rendered outside Router context in simple unit tests
+  }
+
+  const handleView = (item) => {
+    const sess = item.session_id || currentSessionId || '';
+    if (onViewDetails) {
+      onViewDetails(item.student_id, sess);
+    } else if (navigate) {
+      const query = sess ? `?session=${encodeURIComponent(sess)}` : '';
+      navigate(`/students/${encodeURIComponent(item.student_id)}${query}`);
+    }
+  };
+
   return (
     <div className="recent-attendance-panel" data-testid="recent-attendance">
       <div className="panel-header">
@@ -41,6 +60,15 @@ export function RecentAttendance({ items = [] }) {
                 >
                   {item.status}
                 </span>
+                <button
+                  type="button"
+                  className="btn-view-details"
+                  onClick={() => handleView(item)}
+                  data-testid="btn-view-details"
+                  aria-label={`View details for ${item.name}`}
+                >
+                  View details
+                </button>
               </div>
             </div>
           ))

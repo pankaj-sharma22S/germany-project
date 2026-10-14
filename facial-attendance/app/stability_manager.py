@@ -92,10 +92,12 @@ class StabilityManager:
             )
 
         if rec["already_marked"]:
+            name = rec["recognized_name"] or rec["recognized_id"]
+            name_suffix = f" - {name} ({rec['recognized_id']})" if name else ""
             return StabilityDecision(
                 track_id=t_id,
                 state=FaceStabilityState.ALREADY_MARKED,
-                feedback_message="Already marked",
+                feedback_message=f"Already marked present{name_suffix}",
                 stable_frames=rec["stable_frames"],
                 stable_duration=self.config.stability_duration_seconds,
                 progress=1.0,
@@ -242,7 +244,7 @@ class StabilityManager:
         if not is_known or not student_id:
             rec["unknown_rejected"] = True
             rec["state"] = FaceStabilityState.UNKNOWN
-        elif attendance_status == "Already marked":
+        elif "already marked" in attendance_status.lower():
             rec["already_marked"] = True
             rec["state"] = FaceStabilityState.ALREADY_MARKED
         elif "marked successfully" in attendance_status.lower() or attendance_status == "Present":
