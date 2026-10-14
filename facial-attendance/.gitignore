@@ -1,0 +1,32 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+
+# Environments
+.venv/
+env/
+venv/
+ENV/
+
+# Node / Frontend
+node_modules/
+frontend/node_modules/
+dist/
+frontend/dist/
+.npm/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Output and sensitive biometric files
+data/embeddings.npz
+data/attendance.xlsx
+*.log
+
+# IDE and OS files
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
